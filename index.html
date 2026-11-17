@@ -45,7 +45,7 @@
         <div>
           <span class="text-xs tracking-wider font-semibold text-emerald-200 uppercase">未来group 施設運営システム</span>
           <h1 class="text-lg sm:text-xl font-bold leading-tight">有料老人ホーム 月次報告＆年間予実管理</h1>
-          <p class="text-xs text-emerald-200">対象年度：令和8年6月 ～ 令和9年5月（定員40床）</p>
+          <p class="text-xs text-emerald-200">対象年度：令和8年6月 ～ 令和9年5月（定員40床） <span class="opacity-60">v2026.11.17-1</span></p>
         </div>
       </div>
 
@@ -1000,6 +1000,20 @@
           </div>
         </div>
 
+        <!-- クラウド保存（どの端末でも同じデータ） -->
+        <div class="bg-slate-50 p-5 rounded-xl border border-slate-200 space-y-3">
+          <h3 class="font-bold text-slate-800 text-sm flex items-center gap-2">
+            <i class="fa-solid fa-cloud text-emerald-600"></i> クラウド保存（どの端末でも同じデータ）
+          </h3>
+          <p class="text-xs text-slate-600 leading-relaxed">データ保存用GASのURLと合言葉を入れると、保存のたびにスプレッドシートへ保存し、開いたときに読み込みます。</p>
+          <input type="url" id="data-url" placeholder="https://script.google.com/macros/s/.../exec" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono bg-white">
+          <div class="flex gap-2">
+            <input type="password" id="data-pass" placeholder="合言葉" autocomplete="off" class="flex-grow border border-slate-300 rounded-lg px-3 py-2 text-xs bg-white">
+            <button onclick="saveDataSettings()" class="bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-4 py-2 rounded-lg transition whitespace-nowrap">保存して読み込む</button>
+          </div>
+          <p class="text-[11px] text-slate-500">この端末に残っているデータが、クラウドが空の場合のみクラウドへ送られます。クラウドにデータがあるときは、クラウド側が優先されます。</p>
+        </div>
+
         <!-- 5枚スライド自動生成対応 GASスクリプトコードブロック -->
         <div class="space-y-3">
           <div class="flex items-center justify-between">
@@ -1575,7 +1589,7 @@
     }
 
     function saveRoomRoster() {
-      localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify(roomRoster));
+      saveLocal(ROOM_STORAGE_KEY, roomRoster);
     }
 
     function snapshotRoomRoster() {
@@ -1748,6 +1762,8 @@
       initCharts();
       onReportMonthChange();
       updateAnnualSummary();
+      loadDataSettings();
+      pullRemote();
 
       // キーボードショートカット (プレゼン用 Esc/矢印キー/Space/PageUpDown)
 
@@ -2045,7 +2061,7 @@
       };
 
       interimStore[monthKey] = record;
-      localStorage.setItem(INTERIM_STORAGE_KEY, JSON.stringify(interimStore));
+      saveLocal(INTERIM_STORAGE_KEY, interimStore);
       if (typeof showToast === "function") showToast("中間報告を保存しました");
     }
 
@@ -2720,7 +2736,7 @@
       };
 
       reportStore[currentSelectedMonth] = monthRecord;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(reportStore));
+      saveLocal(STORAGE_KEY, reportStore);
 
       updateAnnualSummary();
       updateSlideButtonStatus(currentSelectedMonth);
@@ -2901,7 +2917,7 @@
         updatedAt: new Date().toISOString()
       };
 
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(reportStore));
+      saveLocal(STORAGE_KEY, reportStore);
       updateAnnualSummary();
 
       if (currentSelectedMonth === monthKey) {
@@ -4530,7 +4546,7 @@
         slideUrl: url,
         updatedAt: new Date().toISOString()
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(reportStore));
+      saveLocal(STORAGE_KEY, reportStore);
       updateAnnualSummary();
       updateSlideButtonStatus(currentSelectedMonth);
 
@@ -4860,8 +4876,8 @@
             // 旧形式: reportStoreそのものが渡される
             reportStore = { ...reportStore, ...parsed };
           }
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(reportStore));
-          localStorage.setItem(INTERIM_STORAGE_KEY, JSON.stringify(interimStore));
+          saveLocal(STORAGE_KEY, reportStore);
+          saveLocal(INTERIM_STORAGE_KEY, interimStore);
           saveRoomRoster();
           onReportMonthChange();
           updateAnnualSummary();
@@ -5038,6 +5054,84 @@
       setTimeout(() => {
         toast.classList.add("translate-y-20", "opacity-0", "pointer-events-none");
       }, 3500);
+    }
+
+    // ===== クラウド保存（データ保存用GAS）=====
+    const DATA_URL_KEY = "mirai_senior_home_data_url";
+    const DATA_PASS_KEY = "mirai_senior_home_data_pass";
+    let remoteReady = false;
+    const pushTimers = {};
+
+    function syncNames() {
+      return { [STORAGE_KEY]: "reportStore", [INTERIM_STORAGE_KEY]: "interimStore", [ROOM_STORAGE_KEY]: "roomRoster" };
+    }
+
+    function saveLocal(key, obj) {
+      const s = JSON.stringify(obj);
+      localStorage.setItem(key, s);
+      pushRemote(key, s);
+    }
+
+    async function dataCall(body) {
+      const url = localStorage.getItem(DATA_URL_KEY), pass = localStorage.getItem(DATA_PASS_KEY);
+      if (!url || !pass) return null;
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ pass, ...body }) });
+      return r.json();
+    }
+
+    function remoteErr(r) {
+      const m = { not_setup: "GAS側で合言葉が未設定です", locked: "合言葉の失敗が続いたためロック中です(15分)", bad_pass: "合言葉が違います" };
+      return (r && m[r.reason]) || "通信に失敗しました";
+    }
+
+    function pushRemote(key, s) {
+      const name = syncNames()[key];
+      if (!name || !remoteReady) return;
+      clearTimeout(pushTimers[name]);
+      pushTimers[name] = setTimeout(async () => {
+        try {
+          const r = await dataCall({ op: "save", key: name, value: s });
+          if (!r || !r.ok) throw new Error(remoteErr(r));
+        } catch (e) {
+          showToast("クラウド保存に失敗しました(端末内には保存済み): " + (e.message || ""), "warning");
+        }
+      }, 800);
+    }
+
+    async function pullRemote() {
+      if (!localStorage.getItem(DATA_URL_KEY) || !localStorage.getItem(DATA_PASS_KEY)) return;
+      try {
+        const r = await dataCall({ op: "load" });
+        if (!r || !r.ok) throw new Error(remoteErr(r));
+        const names = syncNames();
+        const toPush = [];
+        Object.keys(names).forEach(key => {
+          const v = r.data[names[key]];
+          if (typeof v === "string") localStorage.setItem(key, v);
+          else if (localStorage.getItem(key)) toPush.push(key);
+        });
+        loadStoredData(); loadRoomRoster(); loadInterimStore();
+        onReportMonthChange(); updateAnnualSummary();
+        remoteReady = true;
+        toPush.forEach(key => pushRemote(key, localStorage.getItem(key)));
+        showToast("クラウドのデータを読み込みました", "success");
+      } catch (e) {
+        showToast("クラウド読込に失敗したため、クラウド保存は止めています: " + (e.message || ""), "warning");
+      }
+    }
+
+    function loadDataSettings() {
+      document.getElementById("data-url").value = localStorage.getItem(DATA_URL_KEY) || "";
+      document.getElementById("data-pass").value = localStorage.getItem(DATA_PASS_KEY) || "";
+    }
+
+    function saveDataSettings() {
+      const url = document.getElementById("data-url").value.trim();
+      const pass = document.getElementById("data-pass").value;
+      if (!url.startsWith("https://") || !pass) { showToast("URLと合言葉を入力してください", "warning"); return; }
+      localStorage.setItem(DATA_URL_KEY, url);
+      localStorage.setItem(DATA_PASS_KEY, pass);
+      pullRemote();
     }
 
     function saveGasUrl() {
